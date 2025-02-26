@@ -1,22 +1,43 @@
 
------------------------------ VERSÃO 1 ------------------------------------------------ (REGISTROS DUPLICADOS DA PARTE DEVEDORA)
 
---caso retorne mais de um registro, é possivel verificar esses registros com esse select
+--OBS: COLOCAR NO GITHUB DEPOIS HEHE
 
--- Verificar se há registro duplicado na tabela trblhsta_historico 
--- Caso haja, excluir um dos registros na tabela dbto_trblhsta_historico e tb_debito_trabalhista
-select tdth.* from pje.tb_processo tp 
-inner join pje.tb_processo_parte tpp on tpp.id_processo_trf = tp.id_processo
-inner join pje_jt.tb_dbto_trblhsta_historico tdth on tdth.id_processo_parte = tpp.id_processo_parte
-where tp.nr_processo = '0001266-32.2010.5.07.0008'; 
+/***************************************************
+***************************************************
+*Esse erro de exclusão  nos processos antigos e anteriores ao PJe (data de protocolo anterior a 2013), em que o 
+registro do BNDT foi incluido e o processo foi migrado para o PJe. O problema acontece porque nessa migração não foram
+migrados os dados de inclusão no BNDT. Então, para resolver esse problema, basta incluir esses dados na tabela tb_dbto_trabalhista_historico e
+realizar os movimentos necessarios para que a exclusão no PJe seja efetuada com sucesso.
 
 
-CREATE OR REPLACE FUNCTION excluir_BNDT_1(p_nr_processo varchar, p_ds_nome_parte_devedora varchar default null) 
+Há 4 casos possiveis que podem ocorrer:
+
+1 - Os casos em que não há nenhuma parte registrada no PJe para tal processo. 
+ Nestes casos é feito os registros nas tabelas tb_debito_trabalhista e tb_dbto_trblhsta_historico.
+
+2 - Os casos mais comuns, em que há somente uma parte de tal processo para ser habilitado a exclusão.
+Nesse caso em especifico, basta passar o número do processo como parametro na função e deixar o segundo parametro default em null.
+
+3 - Os casos em que há registros duplicados da parte devedora nas tabelas tb_debito_trabalhista e td_dbto_trbhlista_historico.
+Nesse caso, basta excluir um dos reigistros em cada uma das duas tabelas.
+
+4 - E temos também os casos em que o processo tem varias partes então, é necessário, além do número do processo,
+passar também o nome da parte devedora como segundo parametro da função ;)
+
+O script aborda todos esses casos. Porém, caso apareçam outros casos diferentes desses, a implementação do script será 
+melhorada para resolver todas as soluções possiveis.
+
+Ref.: https://jira.trt7.jus.br/jira/browse/CSTIC-4964
+***************************************************
+***************************************************/
+
+
+CREATE OR REPLACE FUNCTION habilitar_exclusao_BNDT(p_nr_processo varchar, p_ds_nome_parte_devedora varchar default null) 
 RETURNS void as $$
 DECLARE
     v_id_processo_parte integer;
     v_id_processo_evento integer;
-    v_count integer;
+    v_qtd_debitos_trabalhistas integer;
     v_id_processo integer;
     v_ds_nome_empresa varchar;
     v_ds_frase_exclusao varchar;
@@ -26,23 +47,77 @@ DECLARE
     v_id_registros_debto_trabalhista_historico_array integer [2];
     v_id_processo_parte_array integer [2];
 
+-------------------------------------------------
+	 vs_ds_nome_parte varchar;
+	 v_dt_alteracao varchar;
+	 v_dt_envio varchar;
+	 v_in_tipo_operacao varchar;
+	 v_id_usuario integer;
+
 BEGIN
   
---verifica a quantidade de registros na tabela debto_trabalhista_historico para um mesmo processo
-select count(tdth.id_debto_trabalhista_historico) into  v_count
+--verifica a quantidade de registros na tabela debito_trabalhista
+select count(dt.id_debito_trabalhista) into  v_qtd_debitos_trabalhistas
 from pje.tb_processo tp 
 inner join pje.tb_processo_parte tpp on tpp.id_processo_trf = tp.id_processo
-inner join pje_jt.tb_dbto_trblhsta_historico tdth on tdth.id_processo_parte = tpp.id_processo_parte
+inner join pje_jt.tb_debito_trabalhista dt on dt.id_processo_parte = tpp.id_processo_parte
+inner join pje_jt.tb_sit_debito_trabalhista tsdt on dt.id_situacao_debito_trabalhista = tsdt.id_situacao_debito_trabalhista
 where tp.nr_processo = p_nr_processo
-and tdth.in_tipo_operacao = 'I';
+and tsdt.in_tipo_operacao = 'I';
 
-IF COALESCE(v_count, 0) = 0 THEN
-    raise notice 'Não foi encontrado nenhum registro';
-    return; -- Apenas encerra a execução, sem retornar valores
+
+--Verificar o historico de registros encontrados para um processo
+FOR v_id_debto_trabalhista_historico, vs_ds_nome_parte, v_dt_alteracao, v_dt_envio, v_in_tipo_operacao IN
+    SELECT dth.id_debto_trabalhista_historico, tul.ds_nome, dth.dt_alteracao, dth.dt_envio, dth.in_tipo_operacao
+    FROM pje.tb_processo tp
+    INNER JOIN pje.tb_processo_parte tpp ON tpp.id_processo_trf = tp.id_processo
+    INNER JOIN pje_jt.tb_dbto_trblhsta_historico dth ON dth.id_processo_parte = tpp.id_processo_parte
+    INNER JOIN pje.tb_pessoa tu ON tu.id_pessoa = tpp.id_pessoa
+    INNER JOIN pje.tb_usuario_login tul ON tu.id_pessoa = tul.id_usuario
+    WHERE tp.nr_processo = p_nr_processo
+LOOP
+	raise notice'-----------------------------------------------------------------------------------------------------------------';
+    raise notice 'ID: %, nome_parte: %, data_alt:%, Data_env: %, tipo: %', v_id_debto_trabalhista_historico, vs_ds_nome_parte, v_dt_alteracao, v_dt_envio, v_in_tipo_operacao;
+END LOOP;
+
+
+--verifica se não há registros
+IF COALESCE(v_qtd_debitos_trabalhistas, 0) = 0 THEN
+   
+	if p_ds_nome_parte_devedora is null then
+		raise notice '---------------------------------------------------------------------------------';
+		raise notice 'Não foi encontrado nenhum registro na tabela tb_debito_trabalhista.';
+		raise notice 'Execute a função novamente e passe o nome da parte como parametro para que seja inseridos os registros necessários para habilitar a exclusão';
+		raise notice '---------------------------------------------------------------------------------';
+		return;
+	end if;
+
+		select tpp.id_processo_parte into v_id_processo_parte
+		from pje.tb_processo tp 
+		inner join pje.tb_processo_parte tpp on tpp.id_processo_trf = tp.id_processo
+		inner join pje.tb_usuario_login tul on tpp.id_pessoa = tul.id_usuario
+		where tp.nr_processo = p_nr_processo
+		and tul.ds_nome = p_ds_nome_parte_devedora;
+
+		if  v_id_processo_parte is null then
+			raise notice 'Não foi encontrado nenhum registro de parte com esse nome. Verifique se o nome passado como parametro está correto';
+			return;
+		end if;
+
+
+		insert into pje_jt.tb_debito_trabalhista (id_debito_trabalhista , id_processo_parte, id_situacao_debito_trabalhista, in_sincronizacao)
+		values (nextval('pje_jt.sq_tb_debito_trabalhista'), v_id_processo_parte, 1, null);
+
+		insert into pje_jt.tb_dbto_trblhsta_historico
+		select nextval('pje_jt.sq_tb_dbto_trblhista_historico'), (current_timestamp-interval '4822 days'), 
+        (current_timestamp-interval '4822 days'), 'I', null, null, v_id_processo_parte, 2, 1, 'N', null, null;
+		raise notice 'Os registros necessários para a exclusão foram inseridos no PJe. Teste a exclusão em bugfix';
+ 	   return; 
 END IF;
 
+
 --verificar se há ou não registro duplicado
-IF COALESCE(v_count, 0) = 2 and p_ds_nome_parte_devedora is null THEN
+IF COALESCE(v_qtd_debitos_trabalhistas, 0) = 2 and p_ds_nome_parte_devedora is null THEN
    -- Verificar se há registro duplicado na tabela trblhsta_historico
 	-- Caso haja, excluir um dos registros na tabela dbto_trblhsta_historico 
 	FOR v_id_debto_trabalhista_historico, v_id_processo_parte IN
@@ -59,7 +134,23 @@ IF COALESCE(v_count, 0) = 2 and p_ds_nome_parte_devedora is null THEN
 	
 	-- Se houver registro duplicado na tabela, excluir um deles aqui!!!
 	IF v_id_processo_parte_array[1] = v_id_processo_parte_array[2] THEN
-	    DELETE FROM pje_jt.tb_dbto_trblhsta_historico WHERE id_debto_trabalhista_historico = v_id_registros_debto_trabalhista_historico[2];
+
+		for v_dt_alteracao, v_dt_envio, v_id_usuario in
+			(select dt_alteracao, dt_envio, id_usuario
+			from pje_jt.tb_dbto_trblhsta_historico
+			where id_processo_parte = v_id_processo_parte_array[1])
+		loop
+		--fazer uma validação dps
+		end loop;
+
+		raise notice' ';
+		raise notice'--Para ficar o registro caso seja necessária a reversão:';
+		raise notice '-- INSERT INTO tb_dbto_trblhsta_historico (id_debto_trabalhista_historico, dt_alteracao, dt_envio, in_tipo_operacao, ds_resposta_envio, id_motivo, 
+         id_processo_parte, id_situacao_debito_trabalhista, id_usuario, in_adiar_envio, in_assinado, cd_erro_bndt) 
+       	VALUES(%, %, %, ''I'', NULL, NULL, %, 1, %, ''N'', ''N'', NULL);',v_id_registros_debto_trabalhista_historico_array[1], v_dt_alteracao, v_dt_envio, v_id_processo_parte_array[1], v_id_usuario;
+		raise notice '------------------------------------Exclusão:---------------------------------------------------';
+	  	 raise notice 'DELETE FROM pje_jt.tb_dbto_trblhsta_historico WHERE id_debto_trabalhista_historico = %;', v_id_registros_debto_trabalhista_historico_array[2];
+
 	END IF;
 	
 	-- Limpar a variável v_id_processo_parte_array
@@ -80,25 +171,31 @@ IF COALESCE(v_count, 0) = 2 and p_ds_nome_parte_devedora is null THEN
 	
 	-- Se houver registro duplicado na tabela, excluir um deles aqui!!!
 	IF v_id_processo_parte_array[1] = v_id_processo_parte_array[2] THEN
-	    DELETE FROM pje_jt.tb_debito_trabalhista WHERE id_debito_trabalhista = v_id_registros_debito_trabalhista_array[1];
-		raise notice 'Operaçoes executadas com sucesso! Verifique se é possivel excluir a parte do BNDT do PJE';
+		raise notice' ';
+		raise notice'--Para ficar o registro caso seja necessária a reversão:';
+		raise notice '--INSERT INTO pje_jt.tb_debito_trabalhista (id_debito_trabalhista, id_processo_parte, id_situacao_debito_trabalhista, in_sincronizacao) 
+		VALUES(%, %, 1, ''S'');', v_id_registros_debito_trabalhista_array[1], v_id_processo_parte_array[1];
+		raise notice '------------------------------------Exclusão:---------------------------------------------------';
+	    raise notice 'DELETE FROM pje_jt.tb_debito_trabalhista WHERE id_debito_trabalhista = %;', v_id_registros_debito_trabalhista_array[2];
    		 return; -- Apenas encerra a execução, sem retornar valores
 	END IF;
 
     --caso não entre nas condições acima, signifca que as duas partes devedoras são diferentes, ou seja, que não tem registro duplicado
+	raise notice' ';
      raise notice 'Há mais de um registro na tabela, informe qual deseja habilitar para excluir';
     return; -- Apenas encerra a execução, sem retornar valores
 END IF;
 
 ------------------------------------------------------------------------------------------------------------------------------
-IF COALESCE(v_count, 0) = 1 THEN
-    -- caso tenha passado pela validação acima, então há apenas um registro na tb_dbto_trblhsta_historico do qual queremos o id_processo e o id_processo_parte
+ -- caso tenha passado pela validação acima, então há apenas um registro na tb_dbto_trblhsta_historico do qual queremos o id_processo e o id_processo_parte
+IF COALESCE(v_qtd_debitos_trabalhistas, 0) = 1 THEN
     select tp.id_processo, tdth.id_processo_parte  into  v_id_processo, v_id_processo_parte
     from pje.tb_processo tp 
     inner join pje.tb_processo_parte tpp on tpp.id_processo_trf = tp.id_processo
     inner join pje_jt.tb_dbto_trblhsta_historico tdth on tdth.id_processo_parte = tpp.id_processo_parte
     where tp.nr_processo = p_nr_processo
-	and tdth.in_tipo_situacao = 'I';
+	and tdth.in_tipo_operacao = 'I';
+
 
     INSERT INTO tb_dbto_trblhsta_historico
         (id_debto_trabalhista_historico, dt_alteracao, dt_envio, in_tipo_operacao,
@@ -117,6 +214,11 @@ IF COALESCE(v_count, 0) = 1 THEN
     inner join pje.tb_usuario_login tul on p.id_pessoa = tul.id_usuario
     where tpp.id_processo_parte = v_id_processo_parte;
 
+	if v_ds_nome_empresa is null then
+		raise notice 'Nome da empresa não foi encontrado na base de dados';
+		return;
+	end if;
+
     v_ds_frase_exclusao := FORMAT('Registrada a exclusão de dados de %s %s', v_ds_nome_empresa, 'no BNDT');
 
     --salvar as movimentações realizadas nesse contexto nas tabelas tb_processo_evento e tb_complemento_segmentado
@@ -131,14 +233,15 @@ IF COALESCE(v_count, 0) = 1 THEN
     VALUES
         (0, 1, v_ds_nome_empresa , v_id_processo_evento, 13, 't', 'f', 'PA'),
         (0, 7266, 'exclusão', v_id_processo_evento , 54, 't', 'f', NULL);
-
+	raise notice'--------------------------------------------------------------------------------------------------';
     raise notice 'Operaçoes executadas com sucesso! Verifique se é possivel excluir a parte do BNDT do PJE';
     return; -- Apenas encerra a execução, sem retornar valores
 END IF;
 
 ------------------------------------------------------------------------------------------------------------------------------
-
-IF COALESCE(v_count, 0) > 1 and p_ds_nome_parte_devedora is null THEN
+--verificar melhor essa condição depois
+IF COALESCE(v_qtd_debitos_trabalhistas, 0) > 1 and p_ds_nome_parte_devedora is null THEN
+	raise notice' ';
     raise notice 'Há mais de um registro na tabela, informe qual deseja habilitar para excluir';
     return; -- Apenas encerra a execução, sem retornar valores
 END IF;
@@ -152,7 +255,12 @@ END IF;
 		inner join pje.tb_usuario_login tul on tpp.id_pessoa = tul.id_usuario
 	    where tp.nr_processo = p_nr_processo
 		and tul.ds_nome = p_ds_nome_parte_devedora;
-	
+
+		if v_id_processo, v_id_processo_parte is null then
+			raise notice 'Não foi encontrado a parte do processo que foi passado como parametro. Verifique se o p_ds_nome_parte_devedora passado como parametro está correto';
+			return;
+		end if;
+
 	    INSERT INTO tb_dbto_trblhsta_historico
 	        (id_debto_trabalhista_historico, dt_alteracao, dt_envio, in_tipo_operacao,
 	        ds_resposta_envio, id_motivo,
@@ -180,6 +288,7 @@ END IF;
 	        (0, 1, v_ds_nome_empresa , v_id_processo_evento, 13, 't', 'f', 'PA'),
 	        (0, 7266, 'exclusão', v_id_processo_evento , 54, 't', 'f', NULL);
 	
+		raise notice' ';
 	    raise notice 'Operaçoes executadas com sucesso! Verifique se é possivel excluir a parte do BNDT do PJE';
 	    return; -- Apenas encerra a execução, sem retornar valores
 
@@ -195,13 +304,11 @@ $$ LANGUAGE plpgsql;
 
 do $$
 begin
-		perform excluir_BNDT_1('0001399-46.2016.5.07.0014', null);
+		perform habilitar_exclusao_BNDT('0000534-23.2021.5.07.0022', 'JOSE EYMARD DE QUEIROZ MENDES');
 end $$;
 
 
 --------------------------------------------------------
-
-
 
 
 
