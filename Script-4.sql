@@ -1,0 +1,1 @@
+select * from pje.tb_usuario_login tul where tul.ds_nome ilike '%yasmin rocha%';
